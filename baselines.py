@@ -51,16 +51,12 @@ class MLPModel(nn.Module):
     return self.network(x)
 
 
-def mlp(x_train, y_train, x_test, parameters: Dict[str, int]):
+def mlp(x_train, y_train, x_valid, y_valid, x_test, parameters: Dict[str, int]):
   """Multi-layer perceptron (MLP)."""
   if len(y_train.shape) == 1:
     y_train = convert_vector_to_matrix(y_train)
-
-  # Split train/validation
-  idx = np.random.permutation(len(x_train))
-  split = int(len(idx) * 0.9)
-  x_train, x_valid = x_train[idx[:split]], x_train[idx[split:]]
-  y_train, y_valid = y_train[idx[:split]], y_train[idx[split:]]
+  if len(y_valid.shape) == 1:
+    y_valid = convert_vector_to_matrix(y_valid)
 
   # Setup
   device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -85,11 +81,14 @@ def mlp(x_train, y_train, x_test, parameters: Dict[str, int]):
   # Training with early stopping
   best_loss = float('inf')
   patience_counter = 0
+  patience = parameters.get('patience', 5)
   best_state = None
 
-  for _ in range(parameters['epochs']):
+  for epoch in range(parameters['epochs']):
     # Training
     model.train()
+    epoch_train_loss = 0.0
+    num_batches = 0
     for batch_x, batch_y in train_loader:
       batch_x = batch_x.to(device, non_blocking=True)
       batch_y = batch_y.to(device, non_blocking=True)
@@ -101,18 +100,27 @@ def mlp(x_train, y_train, x_test, parameters: Dict[str, int]):
       loss.backward()
       optimizer.step()
 
+      epoch_train_loss += loss.item()
+      num_batches += 1
+
     # Validation
     model.eval()
     with torch.no_grad():
       val_logits = model(torch.from_numpy(x_valid).float().to(device))
       val_loss = F.cross_entropy(val_logits, y_valid).item()
 
+    # Print progress every 20 epochs
+    if (epoch + 1) % 20 == 0:
+      avg_train_loss = epoch_train_loss / num_batches
+      print(f"  Epoch {epoch+1}/{parameters['epochs']}, Train Loss: {avg_train_loss:.6f}, Val Loss: {val_loss:.6f}")
+
     # Early stopping
     if val_loss < best_loss:
       best_loss = val_loss
       patience_counter = 0
       best_state = model.state_dict()
-    elif (patience_counter := patience_counter + 1) >= 50:
+    elif (patience_counter := patience_counter + 1) >= patience:
+      print(f"  Early stopping at epoch {epoch+1}")
       break
 
   # Restore best model and predict

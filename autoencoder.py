@@ -13,54 +13,57 @@ from torch.utils.data import TensorDataset, DataLoader
 class AutoencoderModel(nn.Module):
   """Autoencoder model - simplified VIME-Self without mask prediction."""
 
-  def __init__(self, dim: int):
+  def __init__(self, input_dim: int, hidden_dim: int):
     super().__init__()
-    # Encoder (same as VIME-Self)
+    # Encoder
     self.encoder = nn.Sequential(
-      nn.Linear(dim, dim),
+      nn.Linear(input_dim, hidden_dim),
       nn.ReLU()
     )
-    # Feature estimator/decoder (same as VIME-Self)
-    self.feature_estimator = nn.Sequential(
-      nn.Linear(dim, dim),
+    # Decoder
+    self.decoder = nn.Sequential(
+      nn.Linear(hidden_dim, input_dim),
       nn.Sigmoid()
     )
 
   def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     encoded = self.encoder(x)
-    feature_output = self.feature_estimator(encoded)
-    return feature_output, encoded
+    reconstructed = self.decoder(encoded)
+    return reconstructed, encoded
 
 
-def train_autoencoder(x_unlab, parameters: Dict[str, int]) -> nn.Module:
+def train_autoencoder(x_train, x_valid, parameters: Dict[str, int]) -> nn.Module:
   """Train autoencoder - simple reconstruction without mask or corruption.
 
   Args:
-    x_unlab: unlabeled feature
-    parameters: epochs, batch_size
+    x_train: training features (labeled + unlabeled combined)
+    x_valid: validation features (external, for early stopping)
+    parameters: epochs, batch_size, hidden_dim
 
   Returns:
     encoder: Representation learning block
   """
-  # Parameters (same as vime_self)
-  _, dim = x_unlab.shape
+  # Parameters
+  _, dim = x_train.shape
   epochs = parameters['epochs']
   batch_size = parameters['batch_size']
+  hidden_dim = parameters['hidden_dim']
   device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-  # Build model (same structure as VIME-Self)
-  model = AutoencoderModel(dim).to(device)
+  # Build model
+  model = AutoencoderModel(dim, hidden_dim).to(device)
   # Use same optimizer settings as VIME-Self
   optimizer = torch.optim.RMSprop(model.parameters(), lr=0.001, alpha=0.9, eps=1e-7)
 
-  # Define loss functions
+  # Define loss function
   mse_loss = nn.MSELoss()
 
   # Convert to tensors (same as vime_self)
-  x_unlab_tensor = torch.from_numpy(x_unlab).float()
+  x_train_tensor = torch.from_numpy(x_train).float()
+  x_valid_tensor = torch.from_numpy(x_valid).float().to(device)
 
   # Create dataset (same as vime_self)
-  dataset = TensorDataset(x_unlab_tensor)
+  dataset = TensorDataset(x_train_tensor)
   dataloader = DataLoader(
     dataset,
     batch_size=batch_size,
@@ -68,23 +71,58 @@ def train_autoencoder(x_unlab, parameters: Dict[str, int]) -> nn.Module:
     pin_memory=True if device.type == 'cuda' else False
   )
 
-  # Training loop (same as vime_self)
-  model.train()
-  for _ in range(epochs):
+  # Training loop with early stopping
+  best_loss = float('inf')
+  patience_counter = 0
+  patience = parameters.get('patience', 5)
+  best_state = None
+
+  for epoch in range(epochs):
+    # Training
+    model.train()
+    epoch_loss = 0.0
+    num_batches = 0
     for (batch_x,) in dataloader:
       # Move batch to device
       batch_x = batch_x.to(device, non_blocking=True)
 
       # Forward pass
-      feature_pred, _ = model(batch_x)
+      reconstructed, _ = model(batch_x)
 
       # Compute loss (only reconstruction, no mask)
-      loss = mse_loss(feature_pred, batch_x)
+      loss = mse_loss(reconstructed, batch_x)
 
       # Backward pass
       optimizer.zero_grad(set_to_none=True)
       loss.backward()
       optimizer.step()
+
+      epoch_loss += loss.item()
+      num_batches += 1
+
+    # Validation every epoch
+    model.eval()
+    with torch.no_grad():
+      valid_reconstructed, _ = model(x_valid_tensor)
+      val_loss = mse_loss(valid_reconstructed, x_valid_tensor).item()
+
+    # Print progress every 20 epochs
+    if (epoch + 1) % 20 == 0:
+      avg_train_loss = epoch_loss / num_batches
+      print(f"  Epoch {epoch+1}/{epochs}, Train Loss: {avg_train_loss:.6f}, Val Loss: {val_loss:.6f}")
+
+    # Early stopping (check every epoch)
+    if val_loss < best_loss:
+      best_loss = val_loss
+      patience_counter = 0
+      best_state = model.state_dict()
+    elif (patience_counter := patience_counter + 1) >= patience:
+      print(f"  Early stopping at epoch {epoch+1}")
+      break
+
+  # Restore best model
+  if best_state is not None:
+    model.load_state_dict(best_state)
 
   # Return encoder in eval mode (same as vime_self)
   return model.encoder.eval()
