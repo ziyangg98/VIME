@@ -1,77 +1,127 @@
-"""VIME: Extending the Success of Self- and Semi-supervised Learning to Tabular Domain (VIME) Codebase.
+"""Data loading utilities for MNIST and synthetic data."""
 
-Reference: Jinsung Yoon, Yao Zhang, James Jordon, Mihaela van der Schaar, 
-"VIME: Extending the Success of Self- and Semi-supervised Learning to Tabular Domain," 
-Neural Information Processing Systems (NeurIPS), 2020.
-Paper link: TBD
-Last updated Date: October 11th 2020
-Code author: Jinsung Yoon (jsyoon0823@gmail.com)
------------------------------
-
-data.py
-- Load and preprocess MNIST data (http://yann.lecun.com/exdb/mnist/)
-"""
-
-# Necessary packages
 import numpy as np
 import pandas as pd
 from torchvision import datasets
 
+
+def split_labeled_unlabeled(X_train, y_train, label_data_rate, seed=None):
+    """Split training data into labeled and unlabeled subsets."""
+    if seed is not None:
+        np.random.seed(seed)
+    idx = np.random.permutation(len(y_train))
+    split_idx = int(len(idx) * label_data_rate)
+    X_label, y_label = X_train[idx[:split_idx]], y_train[idx[:split_idx]]
+    X_unlab = X_train[idx[split_idx:]]
+    return X_label, y_label, X_unlab
+
+
 def load_mnist_data(label_data_rate):
-  """MNIST data loading with train/valid/test split.
+    """Load MNIST data with train/valid/test split."""
+    train_dataset = datasets.MNIST(root="./data", train=True, download=True)
+    test_dataset = datasets.MNIST(root="./data", train=False, download=True)
 
-  Args:
-    - label_data_rate: ratio of labeled data in training set
+    X_train_all = train_dataset.data.numpy()
+    y_train_all = train_dataset.targets.numpy()
+    X_test = test_dataset.data.numpy()
+    y_test = test_dataset.targets.numpy()
 
-  Returns:
-    - x_label, y_label: labeled training dataset
-    - x_unlab: unlabeled training dataset
-    - x_valid, y_valid: validation dataset
-    - x_test, y_test: test dataset
-  """
-  # Import mnist data
-  train_dataset = datasets.MNIST(root='./data', train=True, download=True)
-  test_dataset = datasets.MNIST(root='./data', train=False, download=True)
+    # One-hot encoding and normalization
+    y_train_all = np.asarray(pd.get_dummies(y_train_all))
+    y_test = np.asarray(pd.get_dummies(y_test))
+    X_train_all = X_train_all.reshape(len(X_train_all), -1) / 255.0
+    X_test = X_test.reshape(len(X_test), -1) / 255.0
 
-  x_train_all = train_dataset.data.numpy()
-  y_train_all = train_dataset.targets.numpy()
-  x_test = test_dataset.data.numpy()
-  y_test = test_dataset.targets.numpy()
+    # Split into train (80%) and valid (20%)
+    n_train = int(len(X_train_all) * 0.8)
+    X_train, y_train = X_train_all[:n_train], y_train_all[:n_train]
+    X_valid, y_valid = X_train_all[n_train:], y_train_all[n_train:]
 
-  # One hot encoding for the labels
-  y_train_all = np.asarray(pd.get_dummies(y_train_all))
-  y_test = np.asarray(pd.get_dummies(y_test))
+    # Split training data into labeled and unlabeled
+    X_label, y_label, X_unlab = split_labeled_unlabeled(
+        X_train, y_train, label_data_rate
+    )
 
-  # Normalize features
-  x_train_all = x_train_all / 255.0
-  x_test = x_test / 255.0
+    return X_label, y_label, X_unlab, X_valid, y_valid, X_test, y_test
 
-  # Treat MNIST data as tabular data with 784 features
-  no, dim_x, dim_y = np.shape(x_train_all)
-  test_no, _, _ = np.shape(x_test)
 
-  x_train_all = np.reshape(x_train_all, [no, dim_x * dim_y])
-  x_test = np.reshape(x_test, [test_no, dim_x * dim_y])
+def generate_synthetic_data(
+    n_samples=10000,
+    total_features=200,
+    n_latent=10,
+    n_classes=2,
+    noise_level=0.1,
+    n_noise_features=0,
+    seed=None,
+):
+    """Generate synthetic data from latent variables."""
+    if seed is not None:
+        np.random.seed(seed)
 
-  # Split train_all into train (80%) and valid (20%)
-  n_train = int(no * 0.8)
-  x_train = x_train_all[:n_train]
-  y_train = y_train_all[:n_train]
-  x_valid = x_train_all[n_train:]
-  y_valid = y_train_all[n_train:]
+    n_informative = total_features - n_noise_features
+    z = np.random.randn(n_samples, n_latent)
+    W_x = np.random.randn(n_latent, n_informative) * 2
+    W_y = np.random.randn(n_latent, n_classes) * 2
 
-  # Divide training data into labeled and unlabeled
-  idx = np.random.permutation(len(y_train))
+    # Generate informative features with min-max normalization
+    X_informative = (
+        z @ W_x + np.random.randn(n_samples, n_informative) * noise_level
+    )
+    X_min, X_max = X_informative.min(axis=0, keepdims=True), X_informative.max(
+        axis=0, keepdims=True
+    )
+    X_informative = (X_informative - X_min) / (X_max - X_min + 1e-8)
 
-  # Label data : Unlabeled data = label_data_rate:(1-label_data_rate)
-  label_idx = idx[:int(len(idx)*label_data_rate)]
-  unlab_idx = idx[int(len(idx)*label_data_rate):]
+    # Generate labels with softmax
+    y_logits = z @ W_y + np.random.randn(n_samples, n_classes) * noise_level
+    y_probs = np.exp(y_logits - y_logits.max(axis=1, keepdims=True))
+    y_probs /= y_probs.sum(axis=1, keepdims=True)
+    y_labels = np.array([np.random.choice(n_classes, p=p) for p in y_probs])
+    y = np.eye(n_classes)[y_labels]
 
-  # Unlabeled data
-  x_unlab = x_train[unlab_idx, :]
+    # Add noise features if needed
+    X = (
+        np.hstack([X_informative, np.random.rand(n_samples, n_noise_features)])
+        if n_noise_features > 0
+        else X_informative
+    )
 
-  # Labeled data
-  x_label = x_train[label_idx, :]
-  y_label = y_train[label_idx, :]
+    return X, y, z
 
-  return x_label, y_label, x_unlab, x_valid, y_valid, x_test, y_test
+
+def load_synthetic_data(
+    label_data_rate=0.1,
+    n_samples=10000,
+    total_features=200,
+    n_latent=10,
+    n_classes=10,
+    noise_level=0.1,
+    n_noise_features=0,
+    seed=42,
+):
+    """Load synthetic data with train/valid/test split."""
+    X_all, y_all, _ = generate_synthetic_data(
+        n_samples,
+        total_features,
+        n_latent,
+        n_classes,
+        noise_level,
+        n_noise_features,
+        seed,
+    )
+
+    # Split: train (64%), valid (16%), test (20%)
+    n_train, n_valid = int(n_samples * 0.64), int(n_samples * 0.16)
+    X_train, y_train = X_all[:n_train], y_all[:n_train]
+    X_valid, y_valid = (
+        X_all[n_train : n_train + n_valid],
+        y_all[n_train : n_train + n_valid],
+    )
+    X_test, y_test = X_all[n_train + n_valid :], y_all[n_train + n_valid :]
+
+    # Split training into labeled/unlabeled
+    X_label, y_label, X_unlab = split_labeled_unlabeled(
+        X_train, y_train, label_data_rate, seed=seed + 1 if seed else None
+    )
+
+    return X_label, y_label, X_unlab, X_valid, y_valid, X_test, y_test

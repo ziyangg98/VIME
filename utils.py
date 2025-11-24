@@ -1,127 +1,95 @@
-"""VIME: Extending the Success of Self- and Semi-supervised Learning to Tabular Domain (VIME) Codebase.
+"""Utility functions for VIME framework."""
 
-Reference: Jinsung Yoon, Yao Zhang, James Jordon, Mihaela van der Schaar, 
-"VIME: Extending the Success of Self- and Semi-supervised Learning to Tabular Domain," 
-Neural Information Processing Systems (NeurIPS), 2020.
-Paper link: TBD
-Last updated Date: October 11th 2020
-Code author: Jinsung Yoon (jsyoon0823@gmail.com)
------------------------------
-
-utils.py
-- Utility functions for VIME framework
-- Mask generation, data corruption, metrics, and format conversion
-"""
-
-# Necessary packages
 import numpy as np
+import torch
 from sklearn.metrics import accuracy_score, roc_auc_score
 
-#%%
-def mask_generator (p_m, x):
-  """Generate mask vector.
-  
-  Args:
-    - p_m: corruption probability
-    - x: feature matrix
-    
-  Returns:
-    - mask: binary mask matrix 
-  """
-  mask = np.random.binomial(1, p_m, x.shape)
-  return mask
-  
-#%%
-def pretext_generator (m, x):  
-  """Generate corrupted samples.
-  
-  Args:
-    m: mask matrix
-    x: feature matrix
-    
-  Returns:
-    m_new: final mask matrix after corruption
-    x_tilde: corrupted feature matrix
-  """
-  
-  # Parameters
-  no, dim = x.shape  
-  # Randomly (and column-wise) shuffle data
-  x_bar = np.zeros([no, dim])
-  for i in range(dim):
-    idx = np.random.permutation(no)
-    x_bar[:, i] = x[idx, i]
-    
-  # Corrupt samples
-  x_tilde = x * (1-m) + x_bar * m  
-  # Define new mask matrix
-  m_new = 1 * (x != x_tilde)
 
-  return m_new, x_tilde
+def generate_mask(p, x):
+    """Generate binary mask matrix."""
+    return np.random.binomial(1, p, x.shape)
 
-#%% 
-def perf_metric (metric, y_test, y_test_hat):
-  """Evaluate performance.
-  
-  Args:
-    - metric: acc or auc
-    - y_test: ground truth label
-    - y_test_hat: predicted values
-    
-  Returns:
-    - performance: Accuracy or AUROC performance
-  """
-  # Accuracy metric
-  if metric == 'acc':
-    result = accuracy_score(np.argmax(y_test, axis = 1), 
-                            np.argmax(y_test_hat, axis = 1))
-  # AUROC metric
-  elif metric == 'auc':
-    result = roc_auc_score(y_test[:, 1], y_test_hat[:, 1])      
-    
-  return result
 
-#%% 
-def convert_matrix_to_vector(matrix):
-  """Convert two dimensional matrix into one dimensional vector
-  
-  Args:
-    - matrix: two dimensional matrix
-    
-  Returns:
-    - vector: one dimensional vector
-  """
-  # Parameters
-  no, dim = matrix.shape
-  # Define output  
-  vector = np.zeros([no,])
-  
-  # Convert matrix to vector
-  for i in range(dim):
-    idx = np.where(matrix[:, i] == 1)
-    vector[idx] = i
-    
-  return vector
+def corrupt_samples(mask, x):
+    """Generate corrupted samples by column-wise shuffling."""
+    n, dim = x.shape
+    x_shuffled = np.array(
+        [x[np.random.permutation(n), i] for i in range(dim)]
+    ).T
+    x_corrupt = x * (1 - mask) + x_shuffled * mask
+    return (x != x_corrupt).astype(int), x_corrupt
 
-#%% 
-def convert_vector_to_matrix(vector):
-  """Convert one dimensional vector into two dimensional matrix
-  
-  Args:
-    - vector: one dimensional vector
-    
-  Returns:
-    - matrix: two dimensional matrix
-  """
-  # Parameters
-  no = len(vector)
-  dim = len(np.unique(vector))
-  # Define output
-  matrix = np.zeros([no,dim])
-  
-  # Convert vector to matrix
-  for i in range(dim):
-    idx = np.where(vector == i)
-    matrix[idx, i] = 1
-    
-  return matrix
+
+def evaluate(metric, y_true, y_pred):
+    """Evaluate performance."""
+    if metric == "acc":
+        return accuracy_score(
+            np.argmax(y_true, axis=1), np.argmax(y_pred, axis=1)
+        )
+    elif metric == "auc":
+        return roc_auc_score(y_true[:, 1], y_pred[:, 1])
+
+
+def to_labels(one_hot):
+    """Convert one-hot matrix to label vector."""
+    return np.argmax(one_hot, axis=1)
+
+
+def to_one_hot(labels):
+    """Convert label vector to one-hot matrix."""
+    return np.eye(len(np.unique(labels)))[labels]
+
+
+class EarlyStopping:
+    """Early stopping helper."""
+
+    def __init__(self, patience=5, min_delta=0.0):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.best_loss = float("inf")
+        self.counter = 0
+        self.best_state = None
+
+    def step(self, val_loss, model):
+        """Check if should stop and update best model."""
+        if val_loss < self.best_loss - self.min_delta:
+            self.best_loss = val_loss
+            self.counter = 0
+            self.best_state = model.state_dict().copy()
+            return False
+        else:
+            self.counter += 1
+            return self.counter >= self.patience
+
+    def load_best(self, model):
+        """Load best model state."""
+        if self.best_state:
+            model.load_state_dict(self.best_state)
+
+
+def log_progress(epoch, max_epochs, train_metrics, val_loss, interval=20):
+    """Log training progress."""
+    if (epoch + 1) % interval == 0:
+        metrics_str = ", ".join(
+            f"{k.capitalize()}: {v:.6f}" for k, v in train_metrics.items()
+        )
+        print(f"  Epoch {epoch+1}/{max_epochs}, {metrics_str}, Val: {val_loss:.6f}")
+
+
+def log_iteration_progress(iteration, max_iterations, metrics, interval=20):
+    """Log iteration progress."""
+    if iteration % interval == 0:
+        metrics_str = ", ".join(
+            f"{k.capitalize()}: {v:.6f}" for k, v in metrics.items()
+        )
+        print(f"  Iter {iteration}/{max_iterations}, {metrics_str}")
+
+
+def save_checkpoint(model, path):
+    """Save model checkpoint."""
+    torch.save(model.state_dict(), path)
+
+
+def load_checkpoint(model, path, weights_only=True):
+    """Load model checkpoint."""
+    model.load_state_dict(torch.load(path, weights_only=weights_only))

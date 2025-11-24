@@ -1,147 +1,114 @@
-"""VIME: Extending the Success of Self- and Semi-supervised Learning to Tabular Domain (VIME) Codebase.
-
-Reference: Jinsung Yoon, Yao Zhang, James Jordon, Mihaela van der Schaar,
-"VIME: Extending the Success of Self- and Semi-supervised Learning to Tabular Domain,"
-Neural Information Processing Systems (NeurIPS), 2020.
-"""
+"""VIME self-supervised learning."""
 
 from typing import Dict
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import TensorDataset, DataLoader
-
-from utils import mask_generator, pretext_generator
+from utils import generate_mask, corrupt_samples, EarlyStopping, log_progress
 
 
 class VIMESelfModel(nn.Module):
-  """VIME Self-supervised model."""
+    """VIME self-supervised model."""
 
-  def __init__(self, input_dim: int, hidden_dim: int):
-    super().__init__()
-    self.encoder = nn.Sequential(nn.Linear(input_dim, hidden_dim), nn.ReLU())
-    self.mask_estimator = nn.Sequential(nn.Linear(hidden_dim, input_dim), nn.Sigmoid())
-    self.feature_estimator = nn.Sequential(nn.Linear(hidden_dim, input_dim), nn.Sigmoid())
+    def __init__(self, input_dim: int, hidden_dim: int):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim), nn.ReLU()
+        )
+        self.mask_estimator = nn.Sequential(
+            nn.Linear(hidden_dim, input_dim), nn.Sigmoid()
+        )
+        self.feature_estimator = nn.Sequential(
+            nn.Linear(hidden_dim, input_dim), nn.Sigmoid()
+        )
 
-  def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    encoded = self.encoder(x)
-    return self.mask_estimator(encoded), self.feature_estimator(encoded)
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        encoded = self.encoder(x)
+        return self.mask_estimator(encoded), self.feature_estimator(encoded)
 
 
-def vime_self(x_train, x_valid, p_m: float, alpha: float, parameters: Dict[str, int]) -> nn.Module:
-  """Self-supervised learning part in VIME.
+def vime_self(
+    X_train, X_val, p_mask: float, alpha: float, params: Dict[str, int]
+) -> nn.Module:
+    """VIME self-supervised learning."""
+    _, dim = X_train.shape
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-  Args:
-    x_train: training features (labeled + unlabeled combined)
-    x_valid: validation features (external, for early stopping)
-    p_m: corruption probability
-    alpha: weight for feature loss vs mask loss
-    parameters: dict with 'epochs', 'batch_size', 'hidden_dim'
+    model = VIMESelfModel(dim, params["hidden_dim"]).to(device)
+    optimizer = torch.optim.RMSprop(
+        model.parameters(), lr=0.001, alpha=0.9, eps=1e-7
+    )
 
-  Returns:
-    encoder: trained encoder module
-  """
-  # Setup
-  _, dim = x_train.shape
-  hidden_dim = parameters['hidden_dim']
-  device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # Generate corrupted samples
+    mask_train, mask_val = generate_mask(p_mask, X_train), generate_mask(
+        p_mask, X_val
+    )
+    mask_label, X_corrupt = corrupt_samples(mask_train, X_train)
+    mask_label_val, X_corrupt_val = corrupt_samples(mask_val, X_val)
 
-  # Build model
-  model = VIMESelfModel(dim, hidden_dim).to(device)
-  # Use Keras-compatible RMSprop parameters
-  optimizer = torch.optim.RMSprop(model.parameters(), lr=0.001, alpha=0.9, eps=1e-7)
+    loader = DataLoader(
+        TensorDataset(
+            torch.from_numpy(X_corrupt).float(),
+            torch.from_numpy(mask_label).float(),
+            torch.from_numpy(X_train).float(),
+        ),
+        batch_size=params["batch_size"],
+        shuffle=True,
+        pin_memory=device.type == "cuda",
+    )
 
-  # Generate corrupted samples for training (on CPU)
-  m_train = mask_generator(p_m, x_train)
-  m_label, x_tilde = pretext_generator(m_train, x_train)
+    # Validation tensors
+    X_corrupt_val_t = torch.from_numpy(X_corrupt_val).float().to(device)
+    mask_label_val_t = torch.from_numpy(mask_label_val).float().to(device)
+    X_val_t = torch.from_numpy(X_val).float().to(device)
 
-  # Generate corrupted samples for validation
-  m_valid = mask_generator(p_m, x_valid)
-  m_label_valid, x_tilde_valid = pretext_generator(m_valid, x_valid)
+    early_stopping = EarlyStopping(patience=params.get("patience", 5))
 
-  # Create training dataset (keep on CPU, move to GPU in training loop)
-  dataset = TensorDataset(
-    torch.from_numpy(x_tilde).float(),
-    torch.from_numpy(m_label).float(),
-    torch.from_numpy(x_train).float()
-  )
-  dataloader = DataLoader(
-    dataset,
-    batch_size=parameters['batch_size'],
-    shuffle=True,
-    pin_memory=True if device.type == 'cuda' else False
-  )
+    for epoch in range(params["epochs"]):
+        model.train()
+        total_loss, mask_loss_sum, feat_loss_sum, n_batches = 0.0, 0.0, 0.0, 0
+        for X_corrupt_b, mask_label_b, X_orig_b in loader:
+            X_corrupt_b = X_corrupt_b.to(device, non_blocking=True)
+            mask_label_b = mask_label_b.to(device, non_blocking=True)
+            X_orig_b = X_orig_b.to(device, non_blocking=True)
 
-  # Prepare validation data
-  x_tilde_valid_tensor = torch.from_numpy(x_tilde_valid).float().to(device)
-  m_label_valid_tensor = torch.from_numpy(m_label_valid).float().to(device)
-  x_valid_tensor = torch.from_numpy(x_valid).float().to(device)
+            mask_pred, feat_pred = model(X_corrupt_b)
+            mask_loss = F.binary_cross_entropy(mask_pred, mask_label_b)
+            feat_loss = F.mse_loss(feat_pred, X_orig_b)
+            loss = mask_loss + alpha * feat_loss
 
-  # Training loop with early stopping
-  best_loss = float('inf')
-  patience_counter = 0
-  patience = parameters.get('patience', 5)
-  best_state = None
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            optimizer.step()
 
-  for epoch in range(parameters['epochs']):
-    # Training
-    model.train()
-    epoch_loss = 0.0
-    epoch_mask_loss = 0.0
-    epoch_feature_loss = 0.0
-    num_batches = 0
-    for batch_x_tilde, batch_m_label, batch_x_unlab in dataloader:
-      # Move batch to device
-      batch_x_tilde = batch_x_tilde.to(device, non_blocking=True)
-      batch_m_label = batch_m_label.to(device, non_blocking=True)
-      batch_x_unlab = batch_x_unlab.to(device, non_blocking=True)
+            total_loss += loss.item()
+            mask_loss_sum += mask_loss.item()
+            feat_loss_sum += feat_loss.item()
+            n_batches += 1
 
-      # Forward pass
-      mask_pred, feature_pred = model(batch_x_tilde)
+        model.eval()
+        with torch.no_grad():
+            mask_pred_val, feat_pred_val = model(X_corrupt_val_t)
+            val_loss = (
+                F.binary_cross_entropy(mask_pred_val, mask_label_val_t).item()
+                + alpha * F.mse_loss(feat_pred_val, X_val_t).item()
+            )
 
-      # Compute loss using functional API
-      mask_loss = F.binary_cross_entropy(mask_pred, batch_m_label)
-      feature_loss = F.mse_loss(feature_pred, batch_x_unlab)
-      loss = mask_loss + alpha * feature_loss
+        log_progress(
+            epoch,
+            params["epochs"],
+            {
+                "train": total_loss / n_batches,
+                "mask": mask_loss_sum / n_batches,
+                "feat": feat_loss_sum / n_batches,
+            },
+            val_loss,
+        )
 
-      # Backward pass
-      optimizer.zero_grad(set_to_none=True)
-      loss.backward()
-      optimizer.step()
+        if early_stopping.step(val_loss, model):
+            print(f"  Early stopping at epoch {epoch+1}")
+            break
 
-      epoch_loss += loss.item()
-      epoch_mask_loss += mask_loss.item()
-      epoch_feature_loss += feature_loss.item()
-      num_batches += 1
-
-    # Validation every epoch
-    model.eval()
-    with torch.no_grad():
-      mask_pred_val, feature_pred_val = model(x_tilde_valid_tensor)
-      val_mask_loss = F.binary_cross_entropy(mask_pred_val, m_label_valid_tensor).item()
-      val_feature_loss = F.mse_loss(feature_pred_val, x_valid_tensor).item()
-      val_loss = val_mask_loss + alpha * val_feature_loss
-
-    # Print progress every 20 epochs
-    if (epoch + 1) % 20 == 0:
-      avg_train_loss = epoch_loss / num_batches
-      avg_mask = epoch_mask_loss / num_batches
-      avg_feature = epoch_feature_loss / num_batches
-      print(f"  Epoch {epoch+1}/{parameters['epochs']}, Train Loss: {avg_train_loss:.6f} (Mask: {avg_mask:.6f}, Feature: {avg_feature:.6f}), Val Loss: {val_loss:.6f}")
-
-    # Early stopping (check every epoch)
-    if val_loss < best_loss:
-      best_loss = val_loss
-      patience_counter = 0
-      best_state = model.state_dict()
-    elif (patience_counter := patience_counter + 1) >= patience:
-      print(f"  Early stopping at epoch {epoch+1}")
-      break
-
-  # Restore best model
-  if best_state is not None:
-    model.load_state_dict(best_state)
-
-  # Return encoder in eval mode
-  return model.encoder.eval()
+    early_stopping.load_best(model)
+    return model.encoder.eval()

@@ -1,9 +1,4 @@
-"""VIME: Extending the Success of Self- and Semi-supervised Learning to Tabular Domain (VIME) Codebase.
-
-Reference: Jinsung Yoon, Yao Zhang, James Jordon, Mihaela van der Schaar,
-"VIME: Extending the Success of Self- and Semi-supervised Learning to Tabular Domain,"
-Neural Information Processing Systems (NeurIPS), 2020.
-"""
+"""VIME semi-supervised learning."""
 
 from typing import Dict
 import torch
@@ -11,121 +6,123 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import os
-
-from utils import mask_generator, pretext_generator
+from utils import (
+    generate_mask,
+    corrupt_samples,
+    EarlyStopping,
+    log_iteration_progress,
+    save_checkpoint,
+    load_checkpoint,
+)
 
 
 class Predictor(nn.Module):
-  """Predictor network for semi-supervised learning."""
+    """Predictor network."""
 
-  def __init__(self, input_dim: int, hidden_dim: int, label_dim: int):
-    super().__init__()
-    self.network = nn.Sequential(
-      nn.Linear(input_dim, hidden_dim), nn.ReLU(),
-      nn.Linear(hidden_dim, hidden_dim), nn.ReLU(),
-      nn.Linear(hidden_dim, label_dim)
-    )
+    def __init__(self, input_dim: int, hidden_dim: int, label_dim: int):
+        super().__init__()
+        self.network = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, label_dim),
+        )
 
-  def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    logit = self.network(x)
-    return logit, F.softmax(logit, dim=-1)
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        logit = self.network(x)
+        return logit, F.softmax(logit, dim=-1)
 
 
-def vime_semi(x_train, y_train, x_valid, y_valid, x_unlab, x_test, parameters: Dict[str, int],
-              p_m: float, K: int, beta: float, file_name: str):
-  """Semi-supervised learning part in VIME."""
-  # Setup
-  device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-  hidden_dim = parameters['hidden_dim']
-  batch_size = parameters['batch_size']
-  iterations = parameters['iterations']
+def vime_semi(
+    X_train,
+    y_train,
+    X_val,
+    y_val,
+    X_unlabeled,
+    X_test,
+    params: Dict[str, int],
+    p_mask: float,
+    K: int,
+    beta: float,
+    encoder_path: str,
+):
+    """VIME semi-supervised learning."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    encoder = torch.load(encoder_path, weights_only=False).to(device).eval()
 
-  # Load and apply encoder
-  encoder = torch.load(file_name, weights_only=False).to(device).eval()
+    # Pre-encode data
+    with torch.no_grad():
+        X_train_enc = encoder(torch.from_numpy(X_train).float().to(device))
+        X_val_enc = encoder(torch.from_numpy(X_val).float().to(device))
+        X_test_enc = encoder(torch.from_numpy(X_test).float().to(device))
 
-  # Pre-encode all data to avoid repeated CPU-GPU transfers
-  with torch.no_grad():
-    x_train_encoded = encoder(torch.from_numpy(x_train).float().to(device))
-    x_valid_encoded = encoder(torch.from_numpy(x_valid).float().to(device))
-    x_test_encoded = encoder(torch.from_numpy(x_test).float().to(device))
+    predictor = Predictor(
+        X_train_enc.shape[1], params["hidden_dim"], y_train.shape[1]
+    ).to(device)
+    optimizer = torch.optim.Adam(predictor.parameters())
 
-  # Build predictor
-  predictor = Predictor(x_train_encoded.shape[1], hidden_dim, y_train.shape[1]).to(device)
-  optimizer = torch.optim.Adam(predictor.parameters())
+    os.makedirs("./save_model", exist_ok=True)
+    model_path = "./save_model/class_model.pth"
+    early_stopping = EarlyStopping(patience=params.get("patience", 100))
 
-  # Setup early stopping
-  os.makedirs('./save_model', exist_ok=True)
-  model_path = './save_model/class_model.pth'
-  best_loss = float('inf')
-  patience_counter = 0
-  patience = parameters.get('patience', 100)  # Match original VIME patience
+    y_train_t = torch.from_numpy(y_train).float().to(device)
+    y_val_t = torch.from_numpy(y_val).float().to(device)
 
-  y_train_tensor = torch.from_numpy(y_train).float().to(device)
-  y_valid_tensor = torch.from_numpy(y_valid).float().to(device)
+    for i in range(params["iterations"]):
+        # Sample labeled batch
+        idx = np.random.permutation(len(X_train))[: params["batch_size"]]
+        X_batch, y_batch = X_train_enc[idx], y_train_t[idx]
 
-  # Training loop
-  for it in range(iterations):
-    # Sample labeled batch (already encoded)
-    batch_idx = np.random.permutation(len(x_train))[:batch_size]
-    x_batch = x_train_encoded[batch_idx]
-    y_batch = y_train_tensor[batch_idx]
+        # Sample and augment unlabeled batch
+        X_u = X_unlabeled[
+            np.random.permutation(len(X_unlabeled))[: params["batch_size"]]
+        ]
+        X_u_batch = torch.stack(
+            [
+                encoder(
+                    torch.from_numpy(
+                        corrupt_samples(generate_mask(p_mask, X_u), X_u)[1]
+                    )
+                    .float()
+                    .to(device)
+                )
+                for _ in range(K)
+            ]
+        )
 
-    # Sample and augment unlabeled batch
-    xu_batch_ori = x_unlab[np.random.permutation(len(x_unlab))[:batch_size]]
-    xu_batch = []
+        predictor.train()
+        y_logit, _ = predictor(X_batch)
+        sup_loss = F.cross_entropy(y_logit, y_batch)
 
-    for _ in range(K):
-      m_batch = mask_generator(p_m, xu_batch_ori)
-      _, xu_temp = pretext_generator(m_batch, xu_batch_ori)
-      with torch.no_grad():
-        xu_temp = encoder(torch.from_numpy(xu_temp).float().to(device))
-      xu_batch.append(xu_temp)
+        k, bs, dim = X_u_batch.shape
+        y_u_logit = predictor(X_u_batch.view(-1, dim))[0].view(k, bs, -1)
+        unsup_loss = torch.var(y_u_logit, dim=0).mean()
 
-    xu_batch = torch.stack(xu_batch)  # [K, batch_size, dim]
+        loss = sup_loss + beta * unsup_loss
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
 
-    # Train predictor
-    predictor.train()
+        predictor.eval()
+        with torch.no_grad():
+            val_loss = F.cross_entropy(predictor(X_val_enc)[0], y_val_t).item()
 
-    # Supervised loss
-    y_logit, _ = predictor(x_batch)
-    y_loss = F.cross_entropy(y_logit, y_batch)
+        log_iteration_progress(
+            i,
+            params["iterations"],
+            {"sup": sup_loss.item(), "unsup": unsup_loss.item(), "val": val_loss},
+        )
 
-    # Unsupervised loss (variance across augmentations)
-    K_size, bs, dim = xu_batch.shape
-    yv_logit, _ = predictor(xu_batch.view(-1, dim))
-    yv_logit = yv_logit.view(K_size, bs, -1)
-    yu_loss = torch.var(yv_logit, dim=0).mean()
+        if early_stopping.step(val_loss, predictor):
+            save_checkpoint(predictor, model_path)
+            print(f"  Early stopping at iteration {i}")
+            break
 
-    # Combined loss
-    loss = y_loss + beta * yu_loss
+        if val_loss == early_stopping.best_loss:
+            save_checkpoint(predictor, model_path)
 
-    optimizer.zero_grad(set_to_none=True)
-    loss.backward()
-    optimizer.step()
-
-    # Validation every iteration
+    load_checkpoint(predictor, model_path)
     predictor.eval()
     with torch.no_grad():
-      val_logit, _ = predictor(x_valid_encoded)
-      val_loss = F.cross_entropy(val_logit, y_valid_tensor).item()
-
-    # Print progress every 20 iterations
-    if it % 20 == 0:
-      print(f"  Iteration {it}/{iterations}, Sup Loss: {y_loss.item():.6f}, Unsup Loss: {yu_loss.item():.6f}, Val Loss: {val_loss:.6f}")
-
-    # Early stopping (check every iteration)
-    if val_loss < best_loss:
-      best_loss = val_loss
-      patience_counter = 0
-      torch.save(predictor.state_dict(), model_path)
-    elif (patience_counter := patience_counter + 1) >= patience:
-      print(f"  Early stopping at iteration {it}")
-      break
-
-  # Load best model and predict
-  predictor.load_state_dict(torch.load(model_path, weights_only=True))
-  predictor.eval()
-
-  with torch.no_grad():
-    _, y_test_hat = predictor(x_test_encoded)
-    return y_test_hat.cpu().numpy()
+        return predictor(X_test_enc)[1].cpu().numpy()
