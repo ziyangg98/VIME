@@ -49,9 +49,11 @@ ENV/
 
 # Data
 data/
+data_cache/
 *.csv
 *.pkl
 *.pickle
+*.npz
 
 # Logs and outputs
 *.log
@@ -60,9 +62,11 @@ outputs/
 runs/
 
 # Model checkpoints
-save_model/
 checkpoints/
 saved_models/
+
+# Results
+results/
 
 # Temporary files
 *.tmp

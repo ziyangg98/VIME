@@ -64,9 +64,7 @@ def generate_synthetic_data(
     W_y = np.random.randn(n_latent, n_classes) * 2
 
     # Generate informative features with min-max normalization
-    X_informative = (
-        z @ W_x + np.random.randn(n_samples, n_informative) * noise_level
-    )
+    X_informative = z @ W_x + np.random.randn(n_samples, n_informative) * noise_level
     X_min, X_max = X_informative.min(axis=0, keepdims=True), X_informative.max(
         axis=0, keepdims=True
     )
@@ -125,3 +123,52 @@ def load_synthetic_data(
     )
 
     return X_label, y_label, X_unlab, X_valid, y_valid, X_test, y_test
+
+
+if __name__ == "__main__":
+    import argparse
+    import os
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--dataset", choices=["mnist", "synthetic"], default="synthetic"
+    )
+    parser.add_argument("--label_data_rate", type=float, default=0.1)
+    parser.add_argument("--label_no", type=int, default=1000)
+    parser.add_argument("--total_features", type=int, default=200)
+    parser.add_argument("--n_noise_features", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--output_dir", type=str, default="./data_cache")
+    args = parser.parse_args()
+
+    np.random.seed(args.seed)
+
+    if args.dataset == "mnist":
+        X_train, y_train, X_unlabeled, X_val, y_val, X_test, y_test = load_mnist_data(
+            args.label_data_rate
+        )
+    else:
+        X_train, y_train, X_unlabeled, X_val, y_val, X_test, y_test = (
+            load_synthetic_data(
+                args.label_data_rate,
+                total_features=args.total_features,
+                n_noise_features=args.n_noise_features,
+                seed=args.seed,
+            )
+        )
+
+    X_train, y_train = X_train[: args.label_no], y_train[: args.label_no]
+
+    os.makedirs(args.output_dir, exist_ok=True)
+    np.savez(
+        os.path.join(args.output_dir, "data.npz"),
+        X_train=X_train,
+        y_train=y_train,
+        X_unlabeled=X_unlabeled,
+        X_val=X_val,
+        y_val=y_val,
+        X_test=X_test,
+        y_test=y_test,
+    )
+
+    print(f"Data saved: X_train={X_train.shape}, X_unlabeled={X_unlabeled.shape}")
