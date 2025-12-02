@@ -16,7 +16,7 @@ def split_labeled_unlabeled(X_train, y_train, label_data_rate, seed=None):
     return X_label, y_label, X_unlab
 
 
-def load_mnist_data(label_data_rate):
+def load_mnist_data(label_data_rate, seed=42):
     """Load MNIST data with train/valid/test split."""
     train_dataset = datasets.MNIST(root="./data", train=True, download=True)
     test_dataset = datasets.MNIST(root="./data", train=False, download=True)
@@ -39,7 +39,7 @@ def load_mnist_data(label_data_rate):
 
     # Split training data into labeled and unlabeled
     X_label, y_label, X_unlab = split_labeled_unlabeled(
-        X_train, y_train, label_data_rate
+        X_train, y_train, label_data_rate, seed=seed
     )
 
     return X_label, y_label, X_unlab, X_valid, y_valid, X_test, y_test
@@ -49,7 +49,7 @@ def generate_synthetic_data(
     n_samples=10000,
     total_features=200,
     n_latent=10,
-    n_classes=2,
+    n_classes=10,
     noise_level=0.1,
     n_noise_features=0,
     seed=None,
@@ -137,21 +137,21 @@ if __name__ == "__main__":
     parser.add_argument("--label_no", type=int, default=1000)
     parser.add_argument("--total_features", type=int, default=200)
     parser.add_argument("--n_noise_features", type=int, default=0)
+    parser.add_argument("--noise_level", type=float, default=0.1)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output_dir", type=str, default="./data_cache")
     args = parser.parse_args()
 
-    np.random.seed(args.seed)
-
     if args.dataset == "mnist":
         X_train, y_train, X_unlabeled, X_val, y_val, X_test, y_test = load_mnist_data(
-            args.label_data_rate
+            args.label_data_rate, seed=args.seed
         )
     else:
         X_train, y_train, X_unlabeled, X_val, y_val, X_test, y_test = (
             load_synthetic_data(
                 args.label_data_rate,
                 total_features=args.total_features,
+                noise_level=args.noise_level,
                 n_noise_features=args.n_noise_features,
                 seed=args.seed,
             )

@@ -23,7 +23,9 @@ class VIMESelfModel(nn.Module):
 
     def __init__(self, input_dim: int, hidden_dim: int):
         super().__init__()
-        self.encoder = nn.Sequential(nn.Linear(input_dim, hidden_dim), nn.ReLU())
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim), nn.ReLU()
+        )
         self.mask_estimator = nn.Sequential(
             nn.Linear(hidden_dim, input_dim), nn.Sigmoid()
         )
@@ -144,7 +146,7 @@ def vime_semi(
         device
     )
     optimizer = torch.optim.Adam(predictor.parameters())
-    early_stopping = EarlyStopping(patience=params.get("patience", 100))
+    early_stopping = EarlyStopping(patience=params.get("patience", 5))
 
     y_train_t = torch.from_numpy(y_train).float().to(device)
     y_val_t = torch.from_numpy(y_val).float().to(device)
@@ -213,7 +215,7 @@ if __name__ == "__main__":
     parser.add_argument("--data_path", type=str, default="./data_cache/data.npz")
     parser.add_argument("--hidden_dim", type=int, default=100)
     parser.add_argument("--patience", type=int, default=5)
-    parser.add_argument("--semi_patience", type=int, default=100)
+    parser.add_argument("--semi_patience", type=int, default=5)
     parser.add_argument("--batch_size", type=int, default=128)
     parser.add_argument("--epochs", type=int, default=1000)
     parser.add_argument("--iterations", type=int, default=1000)
@@ -222,8 +224,12 @@ if __name__ == "__main__":
     parser.add_argument("--K", type=int, default=3)
     parser.add_argument("--beta", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--semi", action="store_true", help="Run VIME-Semi (default: VIME-Self + MLP)")
     parser.add_argument("--output_path", type=str, default="./results/vime.npy")
     args = parser.parse_args()
+
+    from baseline import train_supervised
+    from utils import transform_with_encoder
 
     set_seed(args.seed)
     data = load_data(args.data_path)
@@ -244,27 +250,47 @@ if __name__ == "__main__":
         },
     )
 
-    # Train VIME-Semi
-    print("Training VIME-Semi...")
-    y_pred = vime_semi(
-        data["X_train"],
-        data["y_train"],
-        data["X_val"],
-        data["y_val"],
-        data["X_unlabeled"],
-        data["X_test"],
-        {
-            "hidden_dim": args.hidden_dim,
-            "batch_size": args.batch_size,
-            "iterations": args.iterations,
-            "patience": args.semi_patience,
-        },
-        args.p_m,
-        args.K,
-        args.beta,
-        encoder,
-    )
+    if args.semi:
+        # Train VIME-Semi
+        print("Training VIME-Semi...")
+        y_pred = vime_semi(
+            data["X_train"],
+            data["y_train"],
+            data["X_val"],
+            data["y_val"],
+            data["X_unlabeled"],
+            data["X_test"],
+            {
+                "hidden_dim": args.hidden_dim,
+                "batch_size": args.batch_size,
+                "iterations": args.iterations,
+                "patience": args.semi_patience,
+            },
+            args.p_m,
+            args.K,
+            args.beta,
+            encoder,
+        )
+        acc = evaluate("acc", data["y_test"], y_pred)
+        print(f"VIME-Semi Accuracy: {acc:.4f}")
+    else:
+        # VIME-Self + MLP
+        print("Evaluating VIME-Self + MLP...")
+        X_train_enc, X_val_enc, X_test_enc = transform_with_encoder(
+            encoder, data["X_train"], data["X_val"], data["X_test"]
+        )
+        acc = train_supervised(
+            X_train_enc,
+            data["y_train"],
+            X_val_enc,
+            data["y_val"],
+            X_test_enc,
+            data["y_test"],
+            "mlp",
+            "acc",
+            args.hidden_dim,
+            args.patience,
+        )
+        print(f"VIME-Self + MLP Accuracy: {acc:.4f}")
 
-    acc = evaluate("acc", data["y_test"], y_pred)
-    print(f"VIME-Semi Accuracy: {acc:.4f}")
     np.save(args.output_path, acc)
