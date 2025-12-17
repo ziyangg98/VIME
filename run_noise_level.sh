@@ -6,7 +6,7 @@ SEED=42
 ITERATIONS=10
 
 N_NOISE_VALUES=(0 50 100)
-NOISE_LEVEL_VALUES=(0.1 0.3 0.5)
+NOISE_LEVEL_VALUES=(0.1)
 
 echo "========================================================================"
 echo "VIME: n_noise vs noise_level"
